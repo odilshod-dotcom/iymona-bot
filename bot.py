@@ -1,6 +1,8 @@
 import os
 import logging
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
@@ -77,7 +79,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = await ask_gemini(user_id, text)
     await message.reply_text(reply)
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
 async def main():
+    t = threading.Thread(target=run_web, daemon=True)
+    t.start()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -85,7 +102,7 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    await app. updater.start_polling(drop_pending_updates=True)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
