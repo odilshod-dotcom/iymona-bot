@@ -3,75 +3,44 @@ import logging
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import google.generativeai as genai
-import google.protobuf
+import httpx
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
 
-logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=GEMINI_API_KEY)
-
 SYSTEM_PROMPT = """Siz Iymona Baby & Kids Store uchun onlayn yordamchisiz.
-Do'kon Telegram orqali ishlaydi: @iymona_baby_and_kids_store_bot
+Telegram: @iymona_baby_and_kids_store_bot
+Mahsulotlar: chaqaloqlar aksessuarlari, gel, shampun, krem, moy
+Narxlar: 15000 dan 200000 so'mgacha
+Yetkazib berish: faqat Jizzax
+To'lov: Click, Payme, Humo, naqd
+Faqat o'zbek tilida, 2-4 gap, iliq munosabat."""
 
-Do'kon haqida:
-- Faqat onlayn do'kon (Telegram orqali)
-- Joylashuv: Jizzax shahri
-- Yetkazib berish: Faqat Jizzax bo'ylab (hozircha)
+async def ask_gemini(text, history):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    messages = [{"role": "user", "parts": [{"text": SYSTEM_PROMPT}]}, {"role": "model", "parts": [{"text": "Tushunarli, yordam beraman!"}]}]
+    for h in history[-6:]:
+        messages.append(h)
+    messages.append({"role": "user", "parts": [{"text": text}]})
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, json={"contents": messages})
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
 
-Mahsulotlar (chaqaloqlar uchun):
-- Aksessuarlar (sochiq, qo'lqop, peshona bog'i va boshqalar)
-- Parvarish mahsulotlari (gel, shampun, krem, moy va boshqalar)
-- Narxlar: 15 000 dan 200 000 so'mgacha
-
-To'lov usullari:
-- Click, Payme, Humo, naqd pul — istalgan usul
-
-Qoidalar:
-- Faqat o'zbek tilida javob bering
-- Qisqa, samimiy va professional bo'ling (2-4 gap)
-- Aniq mahsulot yoki buyurtma uchun @iymona_baby_and_kids_store_bot ga yo'naltiring
-- Har doim iliq munosabat ko'rsating, emoji ishlatishingiz mumkin 😊"""
-
-chat_sessions = {}
-
-def get_chat(user_id):
-    if user_id not in chat_sessions:
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
-        chat_sessions[user_id] = model.start_chat(history=[])
-    return chat_sessions[user_id]
-
-async def ask_gemini(user_id, text):
-    try:
-        loop = asyncio.get_event_loop()
-        chat = get_chat(user_id)
-        response = await loop.run_in_executor(None, chat.send_message, text)
-        return response.text
-    except Exception as e:
-        logger.error(f"Gemini xatosi: {e}")
-        return "Uzr, hozir texnik muammo bor. Iltimos, qayta yozing 🙏"
+chat_history = {}
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "do'stim"
     await update.message.reply_text(f"Assalomu alaykum, {name}! 👶🌸\nIymona Baby & Kids Store ga xush kelibsiz!\nSavol bo'lsa so'rashingiz mumkin 😊")
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛍 Mahsulotlar, buyurtma, yetkazib berish haqida so'rang!\n📦 Buyurtma: @iymona_baby_and_kids_store_bot")
-
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_sessions.pop(update.effective_user.id, None)
+    chat_history.pop(update.effective_user.id, None)
     await update.message.reply_text("Suhbat tozalandi 😊")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -86,12 +55,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_mention and not is_reply:
             return
         text = text.replace(f"@{BOT_USERNAME}", "").strip()
-        if not text:
-            await message.reply_text("Savolingizni yozing 😊")
-            return
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-    reply = await ask_gemini(user_id, text)
-    await message.reply_text(reply)
+    history = chat_history.get(user_id, [])
+    try:
+        reply = await ask_gemini(text, history)
+        history.append({"role": "user", "parts": [{"text": text}]})
+        history.append({"role": "model", "parts": [{"text": reply}]})
+        chat_history[user_id] = history[-10:]
+        await message.reply_text(reply)
+    except Exception as e:
+        logger.error(f"Xato: {e}")
+        await message.reply_text("Uzr, hozir texnik muammo bor. Iltimos, qayta yozing 🙏")
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -103,20 +77,17 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 async def main():
-    t = threading.Thread(target=run_web, daemon=True)
-    t.start()
+    threading.Thread(target=run_web, daemon=True).start()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     await app.initialize()
     await app.start()
-    await app. updater.start_polling(drop_pending_updates=True)
+    await app.updater.start_polling(drop_pending_updates=True)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
