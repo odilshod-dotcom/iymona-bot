@@ -4,6 +4,7 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import google.generativeai as genai
+import google.protobuf
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
