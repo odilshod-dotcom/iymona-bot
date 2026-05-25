@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
@@ -12,7 +13,7 @@ from telegram.ext import (
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-BOT_USERNAME   = os.environ.get("BOT_USERNAME", "")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,8 +39,9 @@ def get_chat(user_id):
 
 async def ask_gemini(user_id, text):
     try:
+        loop = asyncio.get_event_loop()
         chat = get_chat(user_id)
-        response = chat.send_message(text)
+        response = await loop.run_in_executor(None, chat.send_message, text)
         return response.text
     except Exception as e:
         logger.error(f"Gemini xatosi: {e}")
@@ -75,13 +77,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = await ask_gemini(user_id, text)
     await message.reply_text(reply)
 
-def main():
+async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling(drop_pending_updates=True)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
